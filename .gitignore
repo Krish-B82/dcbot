@@ -1,0 +1,10 @@
+# Never upload these
+.env
+*.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# VS Code
+.vscode/

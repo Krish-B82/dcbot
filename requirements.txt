@@ -1,0 +1,5 @@
+discord.py
+playwright
+pytz
+aiohttp
+beautifulsoup4
