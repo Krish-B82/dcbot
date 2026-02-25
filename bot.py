@@ -5,7 +5,16 @@ from datetime import datetime
 import json
 import pytz
 import os
+import subprocess
+import sys
 
+# Install Chromium at runtime if not present
+try:
+    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+    subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"], check=True)
+    print("✅ Chromium installed successfully")
+except Exception as e:
+    print(f"⚠️ Chromium install warning: {e}")
 # Bot Configuration — token loaded from environment variable, never hardcoded
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1475833068865454174
