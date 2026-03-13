@@ -5,16 +5,8 @@ from datetime import datetime
 import json
 import pytz
 import os
-import subprocess
-import sys
+import aiohttp
 
-# Install Chromium at runtime if not present
-try:
-    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-    subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"], check=True)
-    print("✅ Chromium installed successfully")
-except Exception as e:
-    print(f"⚠️ Chromium install warning: {e}")
 # Bot Configuration — token loaded from environment variable, never hardcoded
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1475833068865454174
@@ -58,94 +50,69 @@ last_posted_mirage_hour = None
 
 
 # ========================================
-# STOCK FETCHING
+# STOCK FETCHING (no Playwright needed!)
 # ========================================
-
-def parse_flight_response(text):
-    """Parse React Flight format: lines like 1:{"normal":[...],"mirage":[...]}"""
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        colon_idx = line.find(":")
-        if colon_idx == -1:
-            continue
-        try:
-            payload = json.loads(line[colon_idx + 1:])
-            if isinstance(payload, dict) and ("normal" in payload or "mirage" in payload):
-                normal = [f["name"] for f in payload.get("normal", []) if isinstance(f, dict) and "name" in f]
-                mirage = [f["name"] for f in payload.get("mirage", []) if isinstance(f, dict) and "name" in f]
-                return normal, mirage
-        except (json.JSONDecodeError, ValueError):
-            continue
-    return None, None
-
 
 async def get_stock():
     """
-    Use Playwright to intercept the POST /stock response.
-    Uses domcontentloaded (not networkidle) so we don't time out
-    waiting for background connections fruityblox keeps open.
-    Even if goto raises a timeout, we return whatever data we captured.
+    Directly call the fruityblox.com/stock POST endpoint using aiohttp.
+    No browser needed — just a lightweight HTTP request.
     """
+    url = "https://fruityblox.com/stock"
+    headers = {
+        "Accept": "text/x-component",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "text/plain;charset=UTF-8",
+        "Next-Action": "000e834c372ac1b9cdffe4f36d95a76c33c66cbd36",
+        "Origin": "https://fruityblox.com",
+        "Referer": "https://fruityblox.com/stock",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
     try:
-        from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
-    except ImportError:
-        print("  ❌ Playwright not installed. Run: pip install playwright && playwright install chromium")
-        return [], []
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, data="{}", timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                print(f"  📡 Status: {resp.status}")
+                text = await resp.text()
+                print(f"  📥 Response ({len(text)} bytes)")
 
-    print("  🌐 Launching Playwright...")
-    result = {"normal": None, "mirage": None}
+                # Parse the React Flight format: find line starting with "1:"
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    colon_idx = line.find(":")
+                    if colon_idx == -1:
+                        continue
+                    prefix = line[:colon_idx]
+                    # We want the line with prefix "1" which has the stock data
+                    if prefix != "1":
+                        continue
+                    try:
+                        payload = json.loads(line[colon_idx + 1:])
+                        if isinstance(payload, dict) and ("normal" in payload or "mirage" in payload):
+                            normal = [f["name"] for f in payload.get("normal", []) if isinstance(f, dict) and "name" in f]
+                            mirage = [f["name"] for f in payload.get("mirage", []) if isinstance(f, dict) and "name" in f]
+                            print(f"  ✅ Normal: {normal}")
+                            print(f"  ✅ Mirage: {mirage}")
+                            return normal, mirage
+                    except (json.JSONDecodeError, ValueError) as e:
+                        print(f"  ⚠️ Parse error: {e}")
+                        continue
 
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
-            )
-            page = await browser.new_page()
-
-            async def on_response(response):
-                if result["normal"] is not None:
-                    return
-                try:
-                    if "/stock" in response.url and response.request.method == "POST":
-                        text = await response.text()
-                        print(f"  📥 Intercepted POST /stock ({len(text)} bytes)")
-                        normal, mirage = parse_flight_response(text)
-                        if normal is not None or mirage is not None:
-                            result["normal"] = normal or []
-                            result["mirage"] = mirage or []
-                            print(f"  ✅ Normal: {result['normal']}")
-                            print(f"  ✅ Mirage: {result['mirage']}")
-                except Exception as e:
-                    print(f"  ⚠️ Response handler error: {e}")
-
-            page.on("response", on_response)
-
-            try:
-                await page.goto("https://fruityblox.com/stock", wait_until="domcontentloaded", timeout=20000)
-            except Exception as e:
-                print(f"  ⚠️ Page.goto: {e} — checking if data was captured anyway...")
-
-            # Give JS a moment to fire the POST if it hasn't yet
-            if result["normal"] is None:
-                print("  ⏳ Waiting for POST intercept...")
-                for _ in range(10):
-                    await asyncio.sleep(0.5)
-                    if result["normal"] is not None:
-                        break
-
-            await browser.close()
-
-            if result["normal"] is not None or result["mirage"] is not None:
-                return result["normal"] or [], result["mirage"] or []
-            else:
-                print("  ❌ No stock data intercepted")
+                print("  ❌ No stock data found in response")
+                print(f"  Raw response: {text[:500]}")
                 return [], []
 
+    except aiohttp.ClientError as e:
+        print(f"  ❌ HTTP error: {e}")
+        return [], []
     except Exception as e:
-        print(f"  ❌ Playwright fatal error: {e}")
+        print(f"  ❌ Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         return [], []
@@ -310,7 +277,7 @@ async def check_cmd(ctx):
             await post_stock_update(channel, current_stock["normal"], current_stock["mirage"])
         await ctx.send("✅ Done!")
     else:
-        await ctx.send("❌ Failed to fetch. Check console.")
+        await ctx.send("❌ Failed to fetch. Check Railway logs.")
 
 
 @bot.command(name="rare")
@@ -351,8 +318,8 @@ async def on_ready():
     print(f"✅ Normal: {current_stock['normal']}")
     print(f"✅ Mirage: {current_stock['mirage']}")
 
-    # ✅ KEY FIX: Mark the current hour as already posted so the scheduler
-    # doesn't immediately post again when it starts up on a restock hour
+    # Mark the current hour as already posted so the scheduler
+    # doesn't immediately post again right after startup
     hour = get_current_pt_hour()
     if hour in NORMAL_RESTOCK_HOURS_PT:
         last_posted_normal_hour = hour
@@ -369,6 +336,15 @@ async def on_ready():
 
     if not smart_stock_checker.is_running():
         smart_stock_checker.start()
+
+
+@bot.event
+async def on_resumed():
+    """Fires when Discord reconnects after a drop — restart scheduler if needed"""
+    print("🔄 Discord session resumed — checking scheduler...")
+    if not smart_stock_checker.is_running():
+        smart_stock_checker.start()
+        print("▶️ Scheduler restarted after resume")
 
 
 @bot.event
